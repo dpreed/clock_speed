@@ -3,6 +3,10 @@
  * Copyright (c) 2024 David P. Reed. All rights reserved.
  */
 
+#define _GNU_SOURCE
+
+#include <unistd.h>
+
 #include "shorthand.h"
 
 #include <stdio.h>
@@ -12,6 +16,7 @@
 #include "tsc_freq.h"
 #include "running_average.h"
 #include <math.h>
+#include "cpulist_parse.h"
 
 /*
  * macro that takes an asm instruction and clobbered regs and repeats it 10 times counting
@@ -70,7 +75,7 @@ int main(_unused_ int argc, _unused_ char *argv[])
 {
 	struct timespec start, end;
 	long elapsed_nsec;
-	int err;
+	int err, opt;
 	unsigned long begin, fini, elapsed_cycles;
 	unsigned long overhead;
 	struct tsc_ns_adjust ns_adjust;
@@ -79,6 +84,23 @@ int main(_unused_ int argc, _unused_ char *argv[])
 	unsigned long nsec_variance;
 	unsigned long buffer[32] = {0};
 	unsigned long out_buffer[32] = {0};
+	char *cpu_list = "";
+	cpu_set_t cpuset;
+	size_t cpusetsize = 8;;
+
+	while ((opt = getopt(argc, argv, "c:")) != -1) {
+		switch (opt) {
+		case 'c':
+			cpu_list = optarg;
+			break;
+		default:
+			fprintf(stderr, "Usage: %s [-c <cpu-list>]\n", argv[0]);
+			return 0;
+		}
+	}
+
+	err = parse_cpu_list(cpu_list, &cpuset, cpusetsize);
+	err_exit_negative(err, "Error parsing cpu list\n", 0);
 
 	err = get_tsc_ns_adjust(&ns_adjust);
 	err_exit_negative(err, "Error getting tsc ns adjust\n", 0);
