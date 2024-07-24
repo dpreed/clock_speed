@@ -29,5 +29,21 @@ static inline void err_exit_negative(int err, const char *msg, int perr)
 	}
 }
 
+static inline void err_exit_nonzero(int err, const char *msg, int perr)
+{
+	if (err != 0) {
+		fprintf(stderr, "Error: %s. %s\n", msg, perr? strerror(err) : "");
+		exit(1);
+	}
+}
+
+static inline void null_exit(const void *p, const char *msg, int perr)
+{
+	if (p == NULL) {
+		fprintf(stderr, "Error: %s. %s\n", msg, perr? strerror(errno) : "");
+		exit(1);
+	}
+}
+
 #endif
 
