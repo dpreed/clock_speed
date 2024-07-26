@@ -111,7 +111,7 @@ struct thread_shared_data {
 	pthread_barrier_t barrier1, barrier2;
 	barrier_t spin_barrier1, spin_barrier2;
 	unsigned long timestamp1, timestamp2;
-	bool other_waiting;
+	unsigned long arrival1, arrival2;
 };
 
 int main(_unused_ int argc, _unused_ char *argv[])
@@ -258,6 +258,8 @@ int main(_unused_ int argc, _unused_ char *argv[])
 
 	TIME_INSTRUCTION("lfence", buffer, out_buffer);
 
+	TIME_INSTRUCTION("pause", buffer, out_buffer);
+
 	TIME_INSTRUCTION("nop", buffer, out_buffer);
 
 	TIME_INSTRUCTION("inc %%rax", buffer, out_buffer, "%rax", "cc");
@@ -306,7 +308,19 @@ int main(_unused_ int argc, _unused_ char *argv[])
 		err_exit_nonzero(bar_ret, "Error barrier1 wait failed.", 1);
 	err = pthread_barrier_destroy(&shared->barrier1);
 	err_exit_nonzero(err, "Error destroying barrier1", 1);
+
+	/* Measure synchronization of main and alternate threads after barrier */
 	barrier_wait(&shared->spin_barrier1);
+	shared->arrival1 = tsc_cycles();
+	barrier_init(&shared->spin_barrier1, 2);
+
+	/* wait until both threads have recorded time of arrival */
+	barrier_wait(&shared->spin_barrier2);
+	barrier_init(&shared->spin_barrier2, 2);
+	printf("Barrier sync arrival difference is main-alt %ld cycles\n", (long)(shared->arrival1 - shared->arrival2));
+
+	barrier_wait(&shared->spin_barrier1);
+
 	while((begin = shared->timestamp1) == 0) asm volatile("lfence;");
 	fini = tsc_cycles();
 	shared->timestamp1 = 0;
@@ -316,7 +330,9 @@ int main(_unused_ int argc, _unused_ char *argv[])
 
 	barrier_wait(&shared->spin_barrier2);
 	/* keep writing timestamp to shared variable while the other is waiting*/
+	asm volatile("pause\n"); /* suspend hyperthread */
 	shared->timestamp2 = tsc_cycles();
+	asm volatile("pause\n"); /* suspend hyperthread */
 
 	bar_ret = pthread_barrier_wait(&shared->barrier2);
 	if (bar_ret != PTHREAD_BARRIER_SERIAL_THREAD)
@@ -341,11 +357,20 @@ static void *alt_thread_main(void *arg)
 		err_exit_nonzero(bar_ret, "Error barrier1 wait failed.", 1);
 
 
+	/* spin barrier */
+	barrier_wait(&shared->spin_barrier1);
+	shared->arrival2 = tsc_cycles();
+
+	/* main thread reinitializes barrier1 */
+	barrier_wait(&shared->spin_barrier2);
+	/* main thread prints difference in arrival times, reinitializes barrier2 */
+
 	barrier_wait(&shared->spin_barrier1);
 
-	/* keep writing timestamp to shared variable while the other is waiting*/
-	shared->timestamp1 = tsc_cycles();
-
+	/* write timestamp to shared variable while the other is waiting*/
+	asm volatile("pause\n"); /* suspend hyperthread */
+	shared->timestamp1 = tsc_cycles(); /* PING main */
+	asm volatile("pause\n"); /* suspend hyperthread */
 	barrier_wait(&shared->spin_barrier2);
 
 	while((begin = shared->timestamp2) == 0) asm volatile("lfence;");
