@@ -62,13 +62,13 @@ static inline void barrier_init(barrier_t *barrier, unsigned count)
 
 static inline void barrier_wait(barrier_t *barrier)
 {
-	/* relies on n being power of 2, as set by barrier_init */
+	/* relies on n being power of 2, as initialized by barrier_init */
     unsigned v = BARRIER_INC(&barrier->word);
     unsigned n = barrier->n;
     if (v & (n - 1)) {
 	    for (v &= n; (BARRIER_GET(&barrier->word) & n) == v;)
-		    asm volatile("lfence;"); /* pause to allow other hyperthread to run */
-    } else if (barrier->reset) 	/* non-power-of-two case requires pre-adding initial value */
+		    asm volatile("lfence;"); /* perhaps allows other hyperthread to run sooner */
+    } else if (barrier->reset) 	/* non-power-of-two case requires pre-adding initial value when count wraps */
 	    BARRIER_ADD(&barrier->word, barrier->reset); 
 }
 

@@ -14,12 +14,22 @@ The `getpid()` syscall stands in as a benchmark for the minimal system call over
 
 It is recommended, to eliminate noise, that the test be run on isolated cores, having booted the system with the `isolccpus` kernel parameter. Otherwise, kernel threads and other application threads may preempt the test. On my machine I typically run the test with parameters `-c 6 -a 7' which runs the program's main thread on core 6, and its other thread on core 7. The alternate thread is used in multiprocessing timing tests, like shared memory polling delay.
 
+By default, without arguments, the alternate thread will run on the same dedicated core. This can produce surprising results - in particular, the multiprocessing tests that use two threads and spinning will be remarkably slow because the two threads are locked to the same core. So, set the -c and -p to different cores! 
+
 To measure context switch time, the time taken for the main thread to go through sched_yield() is tested, and also the time to move the thread from one core to another is tested by changing the thread affiliation.
 
 # Building
 
-Typing `make` in the root directory currently builds the program in the `build` subdirectory. It currently names the file built `a.out` because I haven't given it a better name. See the makefile for how to change the TARGET.
+Typing `make` in the root directory currently builds the program in the `build` subdirectory. It currently names the file built `clock_speed` because I haven't given it a better name. See the makefile for how to change the TARGET.
+
+# Running
+
+# Sample test run
+
+I can run this in various x86_64 (AMD64) machines. But I've included the text from a sample run in the file clock_speed.txt. The output of lscpu is appended.
 
 # Roadmap
 
 One key goal is to also measure timing of microbenchmarks in the kernel, where they are different, especially shared-memory between user and kernel. This will be done by creating a safe kernel module that includes the tests and uses the TSC based timing method to report results.
+
+Another thing I want to do is fix the default so that the alternate thread will run by default on a different core than the one where the main thread runs, though it is interesting to be able to run on the same core.

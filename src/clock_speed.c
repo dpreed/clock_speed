@@ -18,11 +18,14 @@
 #include "running_average.h"
 #include "cpulist_parse.h"
 #include "spin_barrier.h"
+#include "pstamp.h"
 
 /*
  * macro that takes an asm instruction and clobbered regs and repeats it 10 times counting
  * cycles, and provides (if needed) registers pointing to data in RSI and RDI that can be
  * included in the string "inst" as %0 and %1 substitutions.
+ * TODO: if b1 or b1 parameter omitted, omit the "S" and/or "D" options in INSTRUCTION,
+ * since this generates two unnecessary timed instructions
  */
 #define INSTRUCTION(inst, b1, b2, ... ) asm volatile(inst "# %0 %1" : : "S"(&b1), "D"(&b2) : __VA_ARGS__);
 #define TWENTYTIMES(x) x x x x x x x x x x x x x x x x x x x x  
@@ -97,9 +100,9 @@ static char * fix_asm(const char *inst, char *fixed)
 }
 
 /* very simple call that gives a different answer each time but isn't inlineable */
-static int simple_call_count = 0;
 static __attribute__((__noinline__)) int simple_call(void)
 {
+	static int simple_call_count = 0;
 	return ++simple_call_count;
 }
 
@@ -109,7 +112,7 @@ static void *alt_thread_main(void *arg);
 
 struct thread_shared_data {
 	pthread_barrier_t barrier1, barrier2;
-	barrier_t spin_barrier1, spin_barrier2;
+	barrier_t spin_barrier;
 	unsigned long timestamp1, timestamp2;
 	unsigned long arrival1, arrival2;
 };
@@ -138,6 +141,8 @@ int main(_unused_ int argc, _unused_ char *argv[])
 	struct thread_shared_data *shared;
 	int bar_ret, result;
 	char *teststr;
+	pstamp_t cause_pstamp;
+	pstamp_ring_t *pstamp_ring;
 
 	/* setup defaults */
 	cpusetsize = (get_nprocs_conf() + 7) >> 3;
@@ -187,8 +192,9 @@ int main(_unused_ int argc, _unused_ char *argv[])
 	err_exit_nonzero(err, "Error initializing barrier1", 1);
 	err = pthread_barrier_init(&shared->barrier2, NULL, 2);
 	err_exit_nonzero(err, "Error initializing barrier2", 1);
-	barrier_init(&shared->spin_barrier1, 2);
-	barrier_init(&shared->spin_barrier2, 2);
+
+	barrier_init(&shared->spin_barrier, 2);
+
 	err = pthread_attr_init(&alt_thread_attr);
 	err_exit_nonzero(err, "Error creating alternate thread attr", 1);
 	err = pthread_attr_setaffinity_np(&alt_thread_attr, cpusetsize, &alt_as_set);
@@ -310,16 +316,19 @@ int main(_unused_ int argc, _unused_ char *argv[])
 	err_exit_nonzero(err, "Error destroying barrier1", 1);
 
 	/* Measure synchronization of main and alternate threads after barrier */
-	barrier_wait(&shared->spin_barrier1);
+	barrier_wait(&shared->spin_barrier);
+
 	shared->arrival1 = tsc_cycles();
-	barrier_init(&shared->spin_barrier1, 2);
 
 	/* wait until both threads have recorded time of arrival */
-	barrier_wait(&shared->spin_barrier2);
-	barrier_init(&shared->spin_barrier2, 2);
-	printf("Barrier sync arrival difference is main-alt %ld cycles\n", (long)(shared->arrival1 - shared->arrival2));
+	barrier_wait(&shared->spin_barrier);
 
-	barrier_wait(&shared->spin_barrier1);
+	elapsed_cycles = (shared->arrival1 > shared->arrival2) ? shared->arrival1 - shared->arrival2 :
+		shared->arrival2 - shared->arrival1;
+	printf("Barrier sync arrival difference is main-alt (%lu cycles) %lu nsec\n\n", elapsed_cycles,
+	       tsc_cycles_to_ns(elapsed_cycles, &ns_adjust));
+
+	barrier_wait(&shared->spin_barrier);
 
 	while((begin = shared->timestamp1) == 0) asm volatile("lfence;");
 	fini = tsc_cycles();
@@ -328,11 +337,23 @@ int main(_unused_ int argc, _unused_ char *argv[])
 	printf("Shared memory ping takes (%lu cycles) %ld nsec\n", elapsed_cycles,
 	       tsc_cycles_to_ns(elapsed_cycles, &ns_adjust));
 
-	barrier_wait(&shared->spin_barrier2);
-	/* keep writing timestamp to shared variable while the other is waiting*/
-	asm volatile("pause\n"); /* suspend hyperthread */
+	barrier_wait(&shared->spin_barrier);
+	/* write timestamp to shared variable while the other is waiting*/
+	asm volatile("pause\n"); /* suspend hyperthread briefly */
 	shared->timestamp2 = tsc_cycles();
-	asm volatile("pause\n"); /* suspend hyperthread */
+	asm volatile("pause\n"); /* suspend hyperthread briefly*/
+
+	barrier_wait(&shared->spin_barrier);
+
+	/* time simple pstamp logging */
+	pstamp_ring = (pstamp_ring_t *)malloc(pstamp_ring_size(1024));
+	null_exit(pstamp_ring, "Error allocating pstamp ring", 1);
+	pstamp_ring_init(pstamp_ring, 1024);
+
+	TIME_CODE_20(pstamp(0, &cause_pstamp););
+	TIME_CODE_20(pstamp_log(pstamp_ring, 1, &cause_pstamp););
+	
+	free(pstamp_ring);
 
 	bar_ret = pthread_barrier_wait(&shared->barrier2);
 	if (bar_ret != PTHREAD_BARRIER_SERIAL_THREAD)
@@ -358,20 +379,20 @@ static void *alt_thread_main(void *arg)
 
 
 	/* spin barrier */
-	barrier_wait(&shared->spin_barrier1);
+	barrier_wait(&shared->spin_barrier);
 	shared->arrival2 = tsc_cycles();
 
 	/* main thread reinitializes barrier1 */
-	barrier_wait(&shared->spin_barrier2);
-	/* main thread prints difference in arrival times, reinitializes barrier2 */
+	barrier_wait(&shared->spin_barrier);
+	/* main thread prints difference in arrival times */
 
-	barrier_wait(&shared->spin_barrier1);
+	barrier_wait(&shared->spin_barrier);
 
 	/* write timestamp to shared variable while the other is waiting*/
-	asm volatile("pause\n"); /* suspend hyperthread */
+	asm volatile("pause\n"); /* suspend hyperthread briefly*/
 	shared->timestamp1 = tsc_cycles(); /* PING main */
-	asm volatile("pause\n"); /* suspend hyperthread */
-	barrier_wait(&shared->spin_barrier2);
+	asm volatile("pause\n"); /* suspend hyperthread briefly*/
+	barrier_wait(&shared->spin_barrier);
 
 	while((begin = shared->timestamp2) == 0) asm volatile("lfence;");
 	fini = tsc_cycles();
@@ -379,6 +400,10 @@ static void *alt_thread_main(void *arg)
 	elapsed_cycles = fini - begin;
 	printf("Shared memory pong takes (%lu cycles) %ld nsec\n", elapsed_cycles,
 	       tsc_cycles_to_ns(elapsed_cycles, &ns_adjust));
+	
+	barrier_wait(&shared->spin_barrier);
+
+	/* here the main program is timing pstamp logging while we wait for it. */
 	
 	printf("\nAlternate thread finished.\n");
 	bar_ret = pthread_barrier_wait(&shared->barrier2);
