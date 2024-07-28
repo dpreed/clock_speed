@@ -1,0 +1,105 @@
+Calibrating speed of interval timers:
+  POSIX clock_gettime(CLOCK_REALTIME) and
+  inline tsc_cycles() which uses RDTSCP instruction
+
+clock_gettime(CLOCK_REALTIME) takes 63 nsec
+tsc_cycles() takes (32 cycles) 12 nsec
+Mean overhead using tsc_cycles() to measure interval is (33 cycles) 12 nsec
+  [Standard deviation of estimated overhead is (1.4 cycles) 0 nsec]
+
+Timing sequences of individual instructions repeated 20 times
+
+20* rdtsc took (521 cycles) 201 nsec. averaging (26.1 cycles) 10.1 nsec.
+20* lfence; rdtsc took (671 cycles) 258 nsec. averaging (33.5 cycles) 12.9 nsec.
+20* rdtscp took (667 cycles) 257 nsec. averaging (33.4 cycles) 12.8 nsec.
+20* lfence took (95 cycles) 36 nsec. averaging (4.75 cycles) 1.8 nsec.
+20* pause took (2913 cycles) 1123 nsec. averaging (146 cycles) 56.1 nsec.
+20* nop took (5 cycles) 1 nsec. averaging (0.25 cycles) 0.05 nsec.
+20* inc rax took (209 cycles) 80 nsec. averaging (10.4 cycles) 4 nsec.
+20* mov (rsi),rdx took (171 cycles) 65 nsec. averaging (8.55 cycles) 3.25 nsec.
+20* mov rdx,(rdi) took (25 cycles) 9 nsec. averaging (1.25 cycles) 0.45 nsec.
+20* sub rax, rax took (5 cycles) 1 nsec. averaging (0.25 cycles) 0.05 nsec.
+20* mov $0,rax took (9 cycles) 3 nsec. averaging (0.45 cycles) 0.15 nsec.
+20* cmpxchg rdx,(rdi); took (105 cycles) 40 nsec. averaging (5.25 cycles) 2 nsec.
+20* lock cmpxchg rdx,(rdi); took (375 cycles) 144 nsec. averaging (18.8 cycles) 7.2 nsec.
+
+Testing call, library, and syscall overhead
+
+20* simple_call(); took (cycles 209) 80 nsec. averaging (10.4 cycles) 4 nsec.
+teststr = malloc(128); took (cycles 2673) 1031 nsec.
+memset(teststr, 'x', 128); teststr[127] = '\0'; took (cycles 23) 8 nsec.
+result = strlen(teststr); took (cycles 2409) 929 nsec.
+getpid(); took (cycles 6317) 2437 nsec.
+sched_yield(); took (cycles 9743) 3758 nsec.
+
+Context switch among cores tests
+
+Switch affinity to current core
+err = sched_setaffinity(0, cpusetsize, &cpu_as_set); took (cycles 14401) 5555 nsec.
+Switch affinity to current core again
+err = sched_setaffinity(0, cpusetsize, &cpu_as_set); took (cycles 5483) 2115 nsec.
+
+Switch affinity to alternate core
+err = sched_setaffinity(0, cpusetsize, &alt_as_set); took (cycles 149513) 57682 nsec.
+Switch affinity back again
+err = sched_setaffinity(0, cpusetsize, &cpu_as_set); took (cycles 149339) 57615 nsec.
+Switch affinity to alternate core
+err = sched_setaffinity(0, cpusetsize, &alt_as_set); took (cycles 144519) 55755 nsec.
+Switch affinity back again
+err = sched_setaffinity(0, cpusetsize, &cpu_as_set); took (cycles 138511) 53437 nsec.
+
+Begin multithread testing
+
+Barrier sync arrival difference is main-alt (98 cycles) 37 nsec
+
+Shared memory ping takes (236 cycles) 91 nsec
+Shared memory pong takes (226 cycles) 87 nsec
+
+Alternate thread finished.
+20* pstamp(0, &cause_pstamp); took (cycles 671) 258 nsec. averaging (33.5 cycles) 12.9 nsec.
+20* pstamp_log(pstamp_ring, 1, &cause_pstamp); took (cycles 861) 332 nsec. averaging (43 cycles) 16.6 nsec.
+Main thread finished.
+
+-----------------------------------------------
+
+Architecture:                         x86_64
+CPU op-mode(s):                       32-bit, 64-bit
+Address sizes:                        39 bits physical, 48 bits virtual
+Byte Order:                           Little Endian
+CPU(s):                               8
+On-line CPU(s) list:                  0-7
+Vendor ID:                            GenuineIntel
+Model name:                           Intel(R) Core(TM) i7-6770HQ CPU @ 2.60GHz
+CPU family:                           6
+Model:                                94
+Thread(s) per core:                   2
+Core(s) per socket:                   4
+Socket(s):                            1
+Stepping:                             3
+Frequency boost:                      enabled
+CPU(s) scaling MHz:                   68%
+CPU max MHz:                          2601.0000
+CPU min MHz:                          800.0000
+BogoMIPS:                             5199.98
+Flags:                                fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc art arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc cpuid aperfmperf pni pclmulqdq dtes64 monitor ds_cpl vmx est tm2 ssse3 sdbg fma cx16 xtpr pdcm pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch cpuid_fault epb pti ssbd ibrs ibpb stibp tpr_shadow flexpriority ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid mpx rdseed adx smap clflushopt intel_pt xsaveopt xsavec xgetbv1 xsaves dtherm ida arat pln pts hwp hwp_notify hwp_act_window hwp_epp vnmi md_clear flush_l1d arch_capabilities
+Virtualization:                       VT-x
+L1d cache:                            128 KiB (4 instances)
+L1i cache:                            128 KiB (4 instances)
+L2 cache:                             1 MiB (4 instances)
+L3 cache:                             6 MiB (1 instance)
+NUMA node(s):                         1
+NUMA node0 CPU(s):                    0-7
+Vulnerability Gather data sampling:   Vulnerable: No microcode
+Vulnerability Itlb multihit:          KVM: Mitigation: VMX disabled
+Vulnerability L1tf:                   Mitigation; PTE Inversion; VMX conditional cache flushes, SMT vulnerable
+Vulnerability Mds:                    Mitigation; Clear CPU buffers; SMT vulnerable
+Vulnerability Meltdown:               Mitigation; PTI
+Vulnerability Mmio stale data:        Mitigation; Clear CPU buffers; SMT vulnerable
+Vulnerability Reg file data sampling: Not affected
+Vulnerability Retbleed:               Mitigation; IBRS
+Vulnerability Spec rstack overflow:   Not affected
+Vulnerability Spec store bypass:      Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:             Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:             Mitigation; IBRS; IBPB conditional; STIBP conditional; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected
+Vulnerability Srbds:                  Mitigation; Microcode
+Vulnerability Tsx async abort:        Mitigation; TSX disabled
