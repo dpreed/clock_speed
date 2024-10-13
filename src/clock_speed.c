@@ -27,7 +27,7 @@
  * TODO: if b1 or b1 parameter omitted, omit the "S" and/or "D" options in INSTRUCTION,
  * since this generates two unnecessary timed instructions
  */
-#define INSTRUCTION(inst, b1, b2, ... ) asm volatile(inst "# %0 %1" : : "S"(&b1), "D"(&b2) : __VA_ARGS__);
+#define INSTRUCTION(inst, b1, b2, ... ) asm volatile(inst "# %0 %1" : : "S"(&b1), "D"(&b2) : "memory" __VA_OPT__(,) __VA_ARGS__);
 #define TWENTYTIMES(x) x x x x x x x x x x x x x x x x x x x x  
 #define TIME_INSTRUCTION(inst, b1, b2, ...)			\
 	{       unsigned long begin, fini, elapsed_cycles, nsec;	\
@@ -110,12 +110,78 @@ static struct tsc_ns_adjust ns_adjust;
 
 static void *alt_thread_main(void *arg);
 
+typedef enum {NO_THREAD, MAIN_THREAD, ALT_THREAD} thread_enum;
+
 struct thread_shared_data {
-	pthread_barrier_t barrier1, barrier2;
+	pthread_barrier_t barrier, barrier2;
 	barrier_t spin_barrier;
 	unsigned long timestamp1, timestamp2;
 	unsigned long arrival1, arrival2;
+	pthread_mutex_t mtx;
+	unsigned long mtx_latest_cycles;
+	bool mtx_test_done;
+	bool same_core; 	/* multicore testing is different when threads are on same core */
+	char *teststr;
 };
+
+static inline void sync_barrier(struct thread_shared_data *shared)
+{
+	/* synchronizing threads by spinning is more precise if not on same core */
+	if (shared->same_core) {
+		int bar_ret = pthread_barrier_wait(&shared->barrier);
+		if (bar_ret != PTHREAD_BARRIER_SERIAL_THREAD)
+			err_exit_nonzero(bar_ret, "Error barrier wait failed.", 1);
+	} else {
+		barrier_wait(&shared->spin_barrier);
+	}
+}
+
+static inline void mtx_test(thread_enum this_thread, struct thread_shared_data *shared)
+{
+	unsigned long touches = 0, accumulated_cycles = 0;
+	unsigned long begin, fini;
+	unsigned long latest_touch_cycles, prev_touch_cycles;
+
+	/* main thread takes mutex first */
+	if (this_thread == ALT_THREAD) {
+		sync_barrier(shared);
+	}
+
+	begin = tsc_cycles();
+
+	fini = begin + 500000000UL; /* go through mutex ping/pong for about 0.1 second (0.5 billion cycles) */
+	prev_touch_cycles = begin;
+	do {
+		unsigned long delta;
+		pthread_mutex_lock(&shared->mtx);
+		latest_touch_cycles = tsc_cycles();
+
+		delta = latest_touch_cycles - prev_touch_cycles;
+		accumulated_cycles += delta;
+		touches += 1;
+		
+		/* tell other thread to take mutex */
+		sync_barrier(shared);
+
+		prev_touch_cycles = tsc_cycles();
+		if (this_thread == MAIN_THREAD)
+			/* only main thread tests for termination */
+			shared->mtx_test_done = prev_touch_cycles >= fini;
+		pthread_mutex_unlock(&shared->mtx);
+
+		sync_barrier(shared); /* let other thread release its mutex */
+	} while (!shared->mtx_test_done);
+
+	/* print results here for this thread (using mutex, after barrier) */
+	/* synchronize printing output */
+	printf("Mutex test finished on %s\n", this_thread == MAIN_THREAD ? "main":"alt");
+	touches = max(1U, touches);
+	printf("  unlock->lock signals %lu, cycles %lu per unlock->lock\n", touches, accumulated_cycles / touches);
+
+	/* allow alt thread to terminate its loop and print */
+	if (this_thread == MAIN_THREAD)
+		sync_barrier(shared);
+}
 
 int main(_unused_ int argc, _unused_ char *argv[])
 {
@@ -139,8 +205,7 @@ int main(_unused_ int argc, _unused_ char *argv[])
 	pthread_t alt_thread;
 	pthread_attr_t alt_thread_attr;
 	struct thread_shared_data *shared;
-	int bar_ret, result;
-	char *teststr;
+	int result;
 	pstamp_t cause_pstamp;
 	pstamp_ring_t *pstamp_ring;
 
@@ -188,8 +253,10 @@ int main(_unused_ int argc, _unused_ char *argv[])
 	shared = malloc(sizeof(struct thread_shared_data));
 	null_exit(shared, "Allocation failed", 1);
 	memset(shared, '\0', sizeof(struct thread_shared_data));
-	err = pthread_barrier_init(&shared->barrier1, NULL, 2);
-	err_exit_nonzero(err, "Error initializing barrier1", 1);
+	shared->same_core = strcmp(cpu_num, cpu_alt) == 0;
+	if (shared->same_core) printf("WARNING: main and alt thread on same core\n");
+	err = pthread_barrier_init(&shared->barrier, NULL, 2);
+	err_exit_nonzero(err, "Error initializing barrier", 1);
 	err = pthread_barrier_init(&shared->barrier2, NULL, 2);
 	err_exit_nonzero(err, "Error initializing barrier2", 1);
 
@@ -199,8 +266,6 @@ int main(_unused_ int argc, _unused_ char *argv[])
 	err_exit_nonzero(err, "Error creating alternate thread attr", 1);
 	err = pthread_attr_setaffinity_np(&alt_thread_attr, cpusetsize, &alt_as_set);
 	err_exit_nonzero(err, "Error creating alternate thread's affinity", 1);
-	err = pthread_attr_setdetachstate(&alt_thread_attr, PTHREAD_CREATE_DETACHED);
-	err_exit_nonzero(err, "Error setting alternate thread's detached state", 1);
 	err = pthread_create(&alt_thread, &alt_thread_attr, alt_thread_main, (void *)shared);
 	err_exit_nonzero(err, "Error creating alternate thread", 1);
 	err = pthread_attr_destroy(&alt_thread_attr);
@@ -285,10 +350,20 @@ int main(_unused_ int argc, _unused_ char *argv[])
 	/* library function time tests */
 	printf("\nTesting call, library, and syscall overhead\n\n");
 	TIME_CODE_20(simple_call(););
-	TIME_CODE(teststr = malloc(128););
-	TIME_CODE(memset(teststr, 'x', 128); teststr[127] = '\0';);
-	TIME_CODE(result = strlen(teststr););
+	TIME_CODE(shared->teststr = malloc(256););
+	TIME_CODE(memset(shared->teststr, 'x', 127); shared->teststr[127] = '\0';);
+	TIME_CODE(result = strlen(shared->teststr););
 	if (result != 127) exit(1); /* just to use the result of strlen */
+	TIME_CODE(strncpy(shared->teststr+128, shared->teststr, 128););
+	TIME_CODE(free(shared->teststr););
+	TIME_CODE(result = posix_memalign((void **) &shared->teststr, 4096, 8192););
+	err_exit_nonzero(result, "calling posix_memalign", 1);
+	TIME_CODE(memset(shared->teststr, 'x', 8192););
+	TIME_CODE(memcpy(shared->teststr, shared->teststr + 4096, 4096););
+	TIME_CODE(free(shared->teststr););
+	
+	/* System call timing tests  */
+	printf("\nSystem call timing\n");
 	TIME_CODE(getpid(); /* syscall */);
 	TIME_CODE(sched_yield(); /* syscall */);
 
@@ -307,44 +382,7 @@ int main(_unused_ int argc, _unused_ char *argv[])
 	printf("Switch affinity back again\n");
 	TIME_CODE(err = sched_setaffinity(0, cpusetsize, &cpu_as_set););
 
-	/* Multi-thread shared data tests */
-	printf("\nBegin multithread testing\n\n");
-	bar_ret = pthread_barrier_wait(&shared->barrier1);
-	if (bar_ret != PTHREAD_BARRIER_SERIAL_THREAD)
-		err_exit_nonzero(bar_ret, "Error barrier1 wait failed.", 1);
-	err = pthread_barrier_destroy(&shared->barrier1);
-	err_exit_nonzero(err, "Error destroying barrier1", 1);
-
-	/* Measure synchronization of main and alternate threads after barrier */
-	barrier_wait(&shared->spin_barrier);
-
-	shared->arrival1 = tsc_cycles();
-
-	/* wait until both threads have recorded time of arrival */
-	barrier_wait(&shared->spin_barrier);
-
-	elapsed_cycles = (shared->arrival1 > shared->arrival2) ? shared->arrival1 - shared->arrival2 :
-		shared->arrival2 - shared->arrival1;
-	printf("Barrier sync arrival difference is main-alt (%lu cycles) %lu nsec\n\n", elapsed_cycles,
-	       tsc_cycles_to_ns(elapsed_cycles, &ns_adjust));
-
-	barrier_wait(&shared->spin_barrier);
-
-	while((begin = shared->timestamp1) == 0) asm volatile("lfence;");
-	fini = tsc_cycles();
-	shared->timestamp1 = 0;
-	elapsed_cycles = fini - begin;
-	printf("Shared memory ping takes (%lu cycles) %ld nsec\n", elapsed_cycles,
-	       tsc_cycles_to_ns(elapsed_cycles, &ns_adjust));
-
-	barrier_wait(&shared->spin_barrier);
-	/* write timestamp to shared variable while the other is waiting*/
-	asm volatile("pause\n"); /* suspend hyperthread briefly */
-	shared->timestamp2 = tsc_cycles();
-	asm volatile("pause\n"); /* suspend hyperthread briefly*/
-
-	barrier_wait(&shared->spin_barrier);
-
+	printf("Time pstamp operations\n");
 	/* time simple pstamp logging */
 	pstamp_ring = (pstamp_ring_t *)malloc(pstamp_ring_size(1024));
 	null_exit(pstamp_ring, "Error allocating pstamp ring", 1);
@@ -355,60 +393,131 @@ int main(_unused_ int argc, _unused_ char *argv[])
 	
 	free(pstamp_ring);
 
-	bar_ret = pthread_barrier_wait(&shared->barrier2);
-	if (bar_ret != PTHREAD_BARRIER_SERIAL_THREAD)
-		err_exit_nonzero(bar_ret, "Error barrier2 wait failed.", 1);
+	/*
+	 * Multi-thread shared data tests, use sync_barrier to coordinate with other thread.
+	 * that is, each test is separated by sync_barrier() waiting for both sides of the test
+	 * to complete their work up to that point.
+	 */
+	printf("\nBegin multithread testing on main thread, sharing address spaces between threads\n");
+	if (shared->same_core)
+		printf("WARNING: main and alt threads are on the SAME CORE\n");
+	sync_barrier(shared);
+
+	/* Measure synchronization of main and alternate threads after pthread_barrier */
+	pthread_barrier_wait(&shared->barrier2);
+
+	shared->arrival1 = tsc_cycles();
+
+	/* wait to print until both threads have recorded time of arrival */
+	sync_barrier(shared);
+
+	elapsed_cycles = (shared->arrival1 > shared->arrival2) ? shared->arrival1 - shared->arrival2 :
+		shared->arrival2 - shared->arrival1;
+	printf("Pthread barrier sync arrival difference is main-alt (%lu cycles) %lu nsec\n", elapsed_cycles,
+	       tsc_cycles_to_ns(elapsed_cycles, &ns_adjust));
+
+	/* Measure synchronization of main and alternate threads after spin barrier */
+	barrier_wait(&shared->spin_barrier);
+
+	shared->arrival1 = tsc_cycles();
+
+	/* wait until both threads have recorded time of arrival */
+	sync_barrier(shared);
+
+	elapsed_cycles = (shared->arrival1 > shared->arrival2) ? shared->arrival1 - shared->arrival2 :
+		shared->arrival2 - shared->arrival1;
+	printf("Spin barrier sync arrival difference is main-alt (%lu cycles) %lu nsec\n\n", elapsed_cycles,
+	       tsc_cycles_to_ns(elapsed_cycles, &ns_adjust));
+
+	sync_barrier(shared);
+
+	/* do ping from alt thread */
+	while((begin = shared->timestamp1) == 0) asm volatile("lfence;");
+	fini = tsc_cycles();
+	shared->timestamp1 = 0;
+	elapsed_cycles = fini - begin;
+	printf("Shared memory ping poll takes (%lu cycles) %ld nsec\n", elapsed_cycles,
+	       tsc_cycles_to_ns(elapsed_cycles, &ns_adjust));
+
+	sync_barrier(shared);
+	/* write timestamp to shared variable while the other is waiting*/
+	asm volatile("pause\n"); /* suspend hyperthread briefly */
+	shared->timestamp2 = tsc_cycles();
+	asm volatile("pause\n"); /* suspend hyperthread briefly*/
+
+	sync_barrier(shared);
+
+	/* initialize mutex timing */
+	pthread_mutex_init(&shared->mtx, NULL);
+	shared->mtx_test_done = false;
+	printf("\nTest of contended mutex wakeup delay\n");
+	sync_barrier(shared);
+
+	/* mutex timing */
+	mtx_test(MAIN_THREAD, shared);
+
+	sync_barrier(shared);
+	
+	/* other thread work is done. wait for alt_thread to exit, destroy barriers  */
+	pthread_join(alt_thread, NULL);
+	printf("\nAlternate thread finished.\n");
+
+	err = pthread_barrier_destroy(&shared->barrier);
+	err_exit_nonzero(err, "Error destroying barrier", 1);
 	err = pthread_barrier_destroy(&shared->barrier2);
 	err_exit_nonzero(err, "Error destroying barrier2", 1);
 
-	printf("Main thread finished.\n");
-	sleep(1);
 
+	printf("Main thread finished.\n");
 	return 0;
 }
 
 static void *alt_thread_main(void *arg)
 {
-	int bar_ret;
 	unsigned long begin, fini, elapsed_cycles;
+	
 	struct thread_shared_data *shared = (struct thread_shared_data *)arg;
 
-	bar_ret = pthread_barrier_wait(&shared->barrier1);
-	if (bar_ret != PTHREAD_BARRIER_SERIAL_THREAD)
-		err_exit_nonzero(bar_ret, "Error barrier1 wait failed.", 1);
+	sync_barrier(shared);
 
+	/* pthread barrier test */
+	pthread_barrier_wait(&shared->barrier2);
+	shared->arrival2 = tsc_cycles();
 
-	/* spin barrier */
+	sync_barrier(shared);
+	/* main thread prints difference in arrival times */
+
+	/* spin barrier test */
 	barrier_wait(&shared->spin_barrier);
 	shared->arrival2 = tsc_cycles();
 
-	/* main thread reinitializes barrier1 */
-	barrier_wait(&shared->spin_barrier);
+	/* wait until both threads capture arrival times */
+	sync_barrier(shared);
 	/* main thread prints difference in arrival times */
 
-	barrier_wait(&shared->spin_barrier);
+	sync_barrier(shared);
 
 	/* write timestamp to shared variable while the other is waiting*/
 	asm volatile("pause\n"); /* suspend hyperthread briefly*/
 	shared->timestamp1 = tsc_cycles(); /* PING main */
 	asm volatile("pause\n"); /* suspend hyperthread briefly*/
-	barrier_wait(&shared->spin_barrier);
+	sync_barrier(shared);
+
 
 	while((begin = shared->timestamp2) == 0) asm volatile("lfence;");
 	fini = tsc_cycles();
 	shared->timestamp2 = 0;
 	elapsed_cycles = fini - begin;
-	printf("Shared memory pong takes (%lu cycles) %ld nsec\n", elapsed_cycles,
+	printf("Shared memory pong poll takes (%lu cycles) %ld nsec\n", elapsed_cycles,
 	       tsc_cycles_to_ns(elapsed_cycles, &ns_adjust));
 	
-	barrier_wait(&shared->spin_barrier);
+	sync_barrier(shared);
+	/* mutex overhead test, wait for main thread initialization */
+	sync_barrier(shared);
 
-	/* here the main program is timing pstamp logging while we wait for it. */
-	
-	printf("\nAlternate thread finished.\n");
-	bar_ret = pthread_barrier_wait(&shared->barrier2);
-	if (bar_ret != PTHREAD_BARRIER_SERIAL_THREAD)
-		err_exit_nonzero(bar_ret, "Error barrier2 wait failed.", 1);
+	mtx_test(ALT_THREAD, shared);
+
+	sync_barrier(shared);
 
 	pthread_exit(NULL);
 }

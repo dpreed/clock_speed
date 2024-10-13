@@ -10,7 +10,10 @@ DEPS := $(OBJS:.o=.d)
 
 INC_FLAGS := $(addprefix -I,$(INC_DIRS))
 
-CFLAGS += -Wall -Wextra -O2 -fno-math-errno -fno-trapping-math
+CFLAGS += -Wall -Wextra
+CFLAGS += -O2
+CFLAGS += -fno-math-errno -fno-trapping-math
+CFLAGS += -g -Wa,-als=listing
 CPPFLAGS ?= $(INC_FLAGS) -MMD -MP
 LDFLAGS += -lm
 
@@ -36,8 +39,8 @@ $(BUILD_DIR)/%.cpp.o: %.cpp
 .PHONY: clean
 
 clean:
+	$(RM) -r $(BUILD_DIR)/src/*
 	$(RM) -r $(BUILD_DIR)
-
 -include $(DEPS)
 
 MKDIR_P ?= mkdir -p
